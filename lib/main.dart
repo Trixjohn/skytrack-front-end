@@ -2,9 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'login_screen.dart';
+import 'search_autocomplete.dart';
+import 'app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await loadSavedTheme();
   runApp(const SkyTrackApp());
 }
 
@@ -15,13 +19,54 @@ class SkyTrackApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'SkyTrack Weather App',
-      theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.blue),
-      home: const WeatherHome(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeModeNotifier,
+      builder: (_, mode, __) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        title: 'SkyTrack Weather App',
+        theme: AppTheme.light,
+        darkTheme: AppTheme.dark,
+        themeMode: mode,
+        home: const _AuthGate(),
+        routes: {
+          '/home': (_) => const WeatherHome(),
+          '/login': (_) => const LoginScreen(),
+        },
+      ),
     );
   }
+}
+
+// ── Auth Gate ─────────────────────────────────────────────────────────────────
+
+class _AuthGate extends StatefulWidget {
+  const _AuthGate();
+  @override
+  State<_AuthGate> createState() => _AuthGateState();
+}
+
+class _AuthGateState extends State<_AuthGate> {
+  @override
+  void initState() {
+    super.initState();
+    _check();
+  }
+
+  Future<void> _check() async {
+    final prefs = await SharedPreferences.getInstance();
+    final loggedIn = prefs.getBool('is_logged_in') ?? false;
+    if (!mounted) return;
+    if (loggedIn) {
+      Navigator.of(context).pushReplacementNamed('/home');
+    } else {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const LoginScreen()));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      const Scaffold(body: Center(child: CircularProgressIndicator()));
 }
 
 // ── Models ────────────────────────────────────────────────────────────────────
@@ -121,20 +166,7 @@ class DailyEntry {
   const DailyEntry(this.day, this.icon, this.condition, this.low, this.high);
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const kBlue = Color(0xFF185FA5);
-const kBlueLight = Color(0xFFE6F1FB);
-const kBlueMid = Color(0xFFB5D4F4);
-const kBlueMuted = Color(0xFF85B7EB);
-const kBg = Color(0xFFF2F5F9);
-const kCard = Colors.white;
-const kTextPrimary = Color(0xFF1F2937);
-const kTextSecondary = Color(0xFF6B7280);
-const kTextTertiary = Color(0xFF9CA3AF);
-const kBorder = Color(0xFFE5E7EB);
-const kPinned = Color(0xFFFACC15);
-const kPinnedBg = Color(0xFFFEF9C3);
+// ── Constants (from app_theme.dart) ─────────────────────────────────────────
 
 // ── Storage ───────────────────────────────────────────────────────────────────
 
@@ -172,22 +204,15 @@ class WeatherHome extends StatefulWidget {
 }
 
 class _WeatherHomeState extends State<WeatherHome> {
-  final TextEditingController _searchCtrl = TextEditingController();
   bool _loading = false;
   String? _error;
   int _selectedHour = 0;
   List<SavedCity> _savedCities = [];
   int _nextId = 1;
   bool _isCelsius = true;
+  String? _homeCityName;
 
-  WeatherData _weather = const WeatherData(
-    city: 'Cebu City',
-    condition: 'Partly Cloudy',
-    temp: 29,
-    feelsLike: 31,
-    humidity: 73,
-    windKph: 12,
-  );
+  WeatherData? _weather; // null = no city loaded yet
 
   final List<HourlyEntry> _hourly = const [
     HourlyEntry('Now', '⛅', 29),
@@ -210,11 +235,11 @@ class _WeatherHomeState extends State<WeatherHome> {
   void initState() {
     super.initState();
     _loadSavedCities();
+    _loadLastCity();
   }
 
   @override
   void dispose() {
-    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -224,6 +249,46 @@ class _WeatherHomeState extends State<WeatherHome> {
       _savedCities = cities;
       _nextId = cities.fold(0, (m, c) => c.id > m ? c.id : m) + 1;
     });
+  }
+
+  // Restore the home city or last searched city on app restart
+  Future<void> _loadLastCity() async {
+    final prefs = await SharedPreferences.getInstance();
+    final homeCity = prefs.getString('home_city');
+    final lastCity = prefs.getString('last_city');
+    
+    setState(() {
+      _homeCityName = homeCity;
+    });
+
+    final cityToLoad = (homeCity != null && homeCity.isNotEmpty) ? homeCity : lastCity;
+    if (cityToLoad != null && cityToLoad.isNotEmpty) {
+      await _fetchWeather(cityToLoad);
+    }
+  }
+
+  Future<void> _setHomeCity(String city) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_homeCityName == city) {
+      await prefs.remove('home_city');
+      setState(() => _homeCityName = null);
+    } else {
+      await prefs.setString('home_city', city);
+      setState(() => _homeCityName = city);
+    }
+  }
+
+  void _toggleTheme() {
+    final next = context.isDark ? ThemeMode.light : ThemeMode.dark;
+    themeModeNotifier.value = next;
+    saveTheme(next);
+  }
+
+  Future<void> _logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('is_logged_in', false);
+    if (!mounted) return;
+    Navigator.of(context).pushReplacementNamed('/login');
   }
 
   // ── Temperature conversion ────────────────────────────────────────────────
@@ -253,7 +318,7 @@ class _WeatherHomeState extends State<WeatherHome> {
     if (c.contains('thunder')) return const Color(0xFF7C3AED);
     if (c.contains('rain') || c.contains('shower')) return const Color(0xFF0369A1);
     if (c.contains('fog')) return const Color(0xFF6B7280);
-    return kBlue;
+    return context.ac.blue;
   }
 
   // ── API fetch ─────────────────────────────────────────────────────────────
@@ -267,9 +332,10 @@ class _WeatherHomeState extends State<WeatherHome> {
       final res = await http.get(url).timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         final d = jsonDecode(res.body);
+        final fetchedCity = d['city'] ?? city;
         setState(() {
           _weather = WeatherData(
-            city: d['city'] ?? city,
+            city: fetchedCity,
             condition: d['condition'] ?? 'Unknown',
             temp: (d['temperature'] as num).toInt(),
             feelsLike: (d['feels_like'] as num?)?.toInt() ??
@@ -279,6 +345,9 @@ class _WeatherHomeState extends State<WeatherHome> {
           );
           _selectedHour = 0;
         });
+        // Persist so next launch restores this city
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('last_city', fetchedCity);
       } else {
         setState(() => _error = 'City not found');
       }
@@ -292,25 +361,29 @@ class _WeatherHomeState extends State<WeatherHome> {
   // ── Saved cities ──────────────────────────────────────────────────────────
 
   void _saveCurrentCity() {
+    if (_weather == null) {
+      _showSnack('Search a city first!', icon: Icons.search);
+      return;
+    }
     final alreadySaved =
-        _savedCities.any((c) => c.city.toLowerCase() == _weather.city.toLowerCase());
+        _savedCities.any((c) => c.city.toLowerCase() == _weather!.city.toLowerCase());
     if (alreadySaved) {
-      _showSnack('${_weather.city} is already saved!', icon: Icons.info_outline);
+      _showSnack('${_weather!.city} is already saved!', icon: Icons.info_outline);
       return;
     }
     final city = SavedCity(
       id: _nextId++,
-      city: _weather.city,
-      condition: _weather.condition,
-      temp: _weather.temp,
-      feelsLike: _weather.feelsLike,
-      humidity: _weather.humidity,
-      windKph: _weather.windKph,
+      city: _weather!.city,
+      condition: _weather!.condition,
+      temp: _weather!.temp,
+      feelsLike: _weather!.feelsLike,
+      humidity: _weather!.humidity,
+      windKph: _weather!.windKph,
       addedAt: DateTime.now(),
     );
     setState(() => _savedCities.add(city));
     CityStorage.save(_savedCities);
-    _showSnack('${_weather.city} saved!', icon: Icons.bookmark_added_outlined);
+    _showSnack('${_weather!.city} saved!', icon: Icons.bookmark_added_outlined);
   }
 
   void _togglePin(int id) {
@@ -360,7 +433,7 @@ class _WeatherHomeState extends State<WeatherHome> {
           ],
           Text(msg),
         ]),
-        backgroundColor: kBlue,
+        backgroundColor: context.ac.blue,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         duration: const Duration(seconds: 2),
@@ -371,6 +444,7 @@ class _WeatherHomeState extends State<WeatherHome> {
   // ── Saved cities drawer ───────────────────────────────────────────────────
 
   void _openSavedCities() {
+    final c = context.ac;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -381,79 +455,46 @@ class _WeatherHomeState extends State<WeatherHome> {
           maxChildSize: 0.92,
           minChildSize: 0.35,
           builder: (_, scrollCtrl) => Container(
-            decoration: const BoxDecoration(
-              color: kBg,
-              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            decoration: BoxDecoration(
+              color: c.bg,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
             ),
             child: Column(
               children: [
                 const SizedBox(height: 12),
-                Container(
-                  width: 40, height: 4,
-                  decoration: BoxDecoration(
-                    color: kBorder,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
+                Container(width: 40, height: 4,
+                  decoration: BoxDecoration(color: c.border, borderRadius: BorderRadius.circular(2))),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Saved cities',
-                          style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.w600,
-                              color: kTextPrimary)),
+                      Text('Saved cities', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: c.textPrimary)),
                       Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: kBlueLight,
-                          borderRadius: BorderRadius.circular(50),
-                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(color: c.blueLight, borderRadius: BorderRadius.circular(50)),
                         child: Text('${_savedCities.length}',
-                            style: const TextStyle(
-                                fontSize: 13,
-                                color: kBlue,
-                                fontWeight: FontWeight.w600)),
+                            style: TextStyle(fontSize: 13, color: c.blue, fontWeight: FontWeight.w600)),
                       ),
                     ],
                   ),
                 ),
                 if (_savedCities.isEmpty)
-                  Expanded(
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.bookmark_border,
-                              size: 48, color: kTextTertiary),
-                          const SizedBox(height: 12),
-                          const Text('No saved cities yet',
-                              style: TextStyle(
-                                  color: kTextSecondary, fontSize: 15)),
-                          const SizedBox(height: 6),
-                          const Text('Search a city and tap the bookmark icon',
-                              style: TextStyle(
-                                  color: kTextTertiary, fontSize: 13)),
-                        ],
-                      ),
-                    ),
-                  )
+                  Expanded(child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.bookmark_border, size: 48, color: c.textTertiary),
+                    const SizedBox(height: 12),
+                    Text('No saved cities yet', style: TextStyle(color: c.textSecondary, fontSize: 15)),
+                    const SizedBox(height: 6),
+                    Text('Search a city and tap the bookmark icon', style: TextStyle(color: c.textTertiary, fontSize: 13)),
+                  ])))
                 else
-                  Expanded(
-                    child: ListView.separated(
-                      controller: scrollCtrl,
-                      padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
-                      itemCount: _savedCities.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 8),
-                      itemBuilder: (_, i) {
-                        final c = _savedCities[i];
-                        return _savedCityCard(c, setModal);
-                      },
-                    ),
-                  ),
+                  Expanded(child: ListView.separated(
+                    controller: scrollCtrl,
+                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+                    itemCount: _savedCities.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (_, i) => _savedCityCard(_savedCities[i], setModal),
+                  )),
               ],
             ),
           ),
@@ -462,94 +503,57 @@ class _WeatherHomeState extends State<WeatherHome> {
     );
   }
 
-  Widget _savedCityCard(SavedCity c, StateSetter setModal) {
-    final cardColor = _conditionColor(c.condition);
+  Widget _savedCityCard(SavedCity city, StateSetter setModal) {
+    final ac = context.ac;
+    final cardColor = _conditionColor(city.condition);
+    final pinnedBg = context.isDark ? kPinnedBgDark : kPinnedBg;
     return GestureDetector(
-      onTap: () => _loadSavedCityWeather(c),
+      onTap: () => _loadSavedCityWeather(city),
       child: Container(
         decoration: BoxDecoration(
-          color: c.isPinned ? kPinnedBg : kCard,
+          color: city.isPinned ? pinnedBg : ac.card,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: c.isPinned ? kPinned : kBorder,
-            width: c.isPinned ? 1.5 : 0.5,
-          ),
+          border: Border.all(color: city.isPinned ? kPinned : ac.border, width: city.isPinned ? 1.5 : 0.5),
         ),
         padding: const EdgeInsets.all(14),
-        child: Row(
-          children: [
-            Container(
-              width: 48,
-              height: 48,
-              decoration: BoxDecoration(
-                color: cardColor.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(12),
+        child: Row(children: [
+          Container(
+            width: 48, height: 48,
+            decoration: BoxDecoration(color: cardColor.withOpacity(0.15), borderRadius: BorderRadius.circular(12)),
+            child: Center(child: Text(_conditionIcon(city.condition), style: const TextStyle(fontSize: 24))),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Text(city.city, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: ac.textPrimary)),
+              if (_homeCityName == city.city) ...[ const SizedBox(width: 6), Icon(Icons.home_rounded, size: 14, color: ac.blue) ],
+              if (city.isPinned) ...[ const SizedBox(width: 6), const Icon(Icons.push_pin_rounded, size: 14, color: kPinned) ],
+            ]),
+            Text(city.condition, style: TextStyle(fontSize: 12, color: ac.textSecondary)),
+          ])),
+          Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+            Text('${_toDisplay(city.temp)}$_unit', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w300, color: cardColor)),
+            const SizedBox(height: 8),
+            Row(children: [
+              GestureDetector(
+                onTap: () { _setHomeCity(city.city); setModal(() {}); },
+                child: Icon(_homeCityName == city.city ? Icons.home_rounded : Icons.home_outlined,
+                    size: 18, color: _homeCityName == city.city ? ac.blue : ac.textTertiary),
               ),
-              child: Center(
-                child: Text(_conditionIcon(c.condition),
-                    style: const TextStyle(fontSize: 24)),
+              const SizedBox(width: 12),
+              GestureDetector(
+                onTap: () { _togglePin(city.id); setModal(() {}); },
+                child: Icon(city.isPinned ? Icons.push_pin_rounded : Icons.push_pin_outlined,
+                    size: 18, color: city.isPinned ? kPinned : ac.textTertiary),
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    Text(c.city,
-                        style: const TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: kTextPrimary)),
-                    if (c.isPinned) ...[
-                      const SizedBox(width: 6),
-                      const Icon(Icons.push_pin_rounded,
-                          size: 14, color: kPinned),
-                    ],
-                  ]),
-                  Text(c.condition,
-                      style: const TextStyle(
-                          fontSize: 12, color: kTextSecondary)),
-                ],
+              const SizedBox(width: 12),
+              GestureDetector(
+                onTap: () { _removeCity(city.id); setModal(() {}); },
+                child: Icon(Icons.delete_outline, size: 18, color: ac.textTertiary),
               ),
-            ),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Text('${_toDisplay(c.temp)}$_unit',
-                    style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w300,
-                        color: cardColor)),
-                const SizedBox(height: 8),
-                Row(children: [
-                  GestureDetector(
-                    onTap: () {
-                      _togglePin(c.id);
-                      setModal(() {});
-                    },
-                    child: Icon(
-                      c.isPinned
-                          ? Icons.push_pin_rounded
-                          : Icons.push_pin_outlined,
-                      size: 18,
-                      color: c.isPinned ? kPinned : kTextTertiary,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  GestureDetector(
-                    onTap: () {
-                      _removeCity(c.id);
-                      setModal(() {});
-                    },
-                    child: const Icon(Icons.delete_outline,
-                        size: 18, color: kTextTertiary),
-                  ),
-                ]),
-              ],
-            ),
-          ],
-        ),
+            ]),
+          ]),
+        ]),
       ),
     );
   }
@@ -558,8 +562,9 @@ class _WeatherHomeState extends State<WeatherHome> {
 
   @override
   Widget build(BuildContext context) {
+    final c = context.ac;
     return Scaffold(
-      backgroundColor: kBg,
+      backgroundColor: c.bg,
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.only(bottom: 24),
@@ -570,14 +575,19 @@ class _WeatherHomeState extends State<WeatherHome> {
               _buildSearchBar(),
               const SizedBox(height: 4),
               if (_error != null) _buildErrorBanner(),
-              _buildUnitToggle(),
-              _buildWeatherCard(),
               if (_savedCities.isNotEmpty) _buildPinnedSection(),
-              _buildSectionTitle('Hourly forecast'),
-              _buildHourlyRow(),
-              _buildSectionTitle('7-day forecast'),
-              _buildDailyList(),
-              const SizedBox(height: 16),
+              if (_weather == null) ...[
+                if (_savedCities.where((c) => c.isPinned).isEmpty)
+                  _buildEmptyState()
+              ] else ...[
+                _buildUnitToggle(),
+                _buildWeatherCard(),
+                _buildSectionTitle('Hourly forecast'),
+                _buildHourlyRow(),
+                _buildSectionTitle('7-day forecast'),
+                _buildDailyList(),
+                const SizedBox(height: 16),
+              ],
             ],
           ),
         ),
@@ -585,168 +595,148 @@ class _WeatherHomeState extends State<WeatherHome> {
     );
   }
 
+Widget _buildEmptyState() {
+  final c = context.ac;
+
+  return Center(
+    child: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.travel_explore,
+            size: 72,
+            color: c.textTertiary,
+          ),
+
+          const SizedBox(height: 16),
+
+          Text(
+            'Search for a city',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+              color: c.textPrimary,
+            ),
+          ),
+
+          const SizedBox(height: 8),
+
+          Text(
+            'Type a city name above to get the current weather',
+            style: TextStyle(
+              fontSize: 13,
+              color: c.textSecondary,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
   // ── Widgets ───────────────────────────────────────────────────────────────
 
-  Widget _buildTopBar() => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Row(children: const [
-              Icon(Icons.cloud_outlined, color: kBlue, size: 22),
-              SizedBox(width: 8),
-              Text('SkyTrack',
-                  style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w600,
-                      color: kTextPrimary)),
-            ]),
-            Row(children: [
-              Stack(
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.bookmark_outline),
-                    color: kTextSecondary,
-                    onPressed: _openSavedCities,
-                  ),
-                  if (_savedCities.isNotEmpty)
-                    Positioned(
-                      right: 8,
-                      top: 8,
-                      child: Container(
-                        width: 16,
-                        height: 16,
-                        decoration: const BoxDecoration(
-                          color: kBlue,
-                          shape: BoxShape.circle,
-                        ),
-                        child: Center(
-                          child: Text(
-                            '${_savedCities.length}',
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w600),
-                          ),
-                        ),
-                      ),
+  Widget _buildTopBar() {
+    final c = context.ac;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 12, 8, 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(children: [
+            Icon(Icons.cloud_outlined, color: c.blue, size: 22),
+            const SizedBox(width: 8),
+            Text('SkyTrack', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: c.textPrimary)),
+          ]),
+          Row(children: [
+            Stack(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.bookmark_outline),
+                  color: c.textSecondary,
+                  onPressed: _openSavedCities,
+                ),
+                if (_savedCities.isNotEmpty)
+                  Positioned(
+                    right: 8, top: 8,
+                    child: Container(
+                      width: 16, height: 16,
+                      decoration: BoxDecoration(color: c.blue, shape: BoxShape.circle),
+                      child: Center(child: Text('${_savedCities.length}',
+                          style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600))),
                     ),
+                  ),
+              ],
+            ),
+            IconButton(
+              icon: Icon(context.isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined),
+              color: c.textSecondary,
+              onPressed: _toggleTheme,
+            ),
+            IconButton(
+              icon: const Icon(Icons.logout_rounded),
+              color: c.textSecondary,
+              onPressed: _logout,
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchBar() => CitySearchBar(
+        onSearch: _fetchWeather,
+        onSave: _saveCurrentCity,
+        loading: _loading,
+      );
+
+  Widget _buildUnitToggle() {
+    final c = context.ac;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(_formattedDate(), style: TextStyle(fontSize: 13, color: c.textTertiary)),
+          GestureDetector(
+            onTap: () => setState(() => _isCelsius = !_isCelsius),
+            child: Container(
+              decoration: BoxDecoration(
+                color: c.card,
+                borderRadius: BorderRadius.circular(50),
+                border: Border.all(color: c.border, width: 0.5),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _unitBtn('°C', _isCelsius),
+                  _unitBtn('°F', !_isCelsius),
                 ],
               ),
-              IconButton(
-                icon: const Icon(Icons.notifications_outlined),
-                color: kTextSecondary,
-                onPressed: () {},
-              ),
-            ]),
-          ],
-        ),
-      );
-
-  Widget _buildSearchBar() => Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Row(children: [
-          Expanded(
-            child: TextField(
-              controller: _searchCtrl,
-              onSubmitted: _fetchWeather,
-              decoration: InputDecoration(
-                hintText: 'Search city...',
-                hintStyle:
-                    const TextStyle(color: kTextTertiary, fontSize: 14),
-                prefixIcon:
-                    const Icon(Icons.search, color: kTextTertiary, size: 20),
-                suffixIcon: _loading
-                    ? const Padding(
-                        padding: EdgeInsets.all(12),
-                        child: SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2)))
-                    : IconButton(
-                        icon: const Icon(Icons.arrow_forward_rounded,
-                            color: kBlue),
-                        onPressed: () => _fetchWeather(_searchCtrl.text),
-                      ),
-                filled: true,
-                fillColor: kCard,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(50),
-                  borderSide: const BorderSide(color: kBorder, width: 0.5),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(50),
-                  borderSide: const BorderSide(color: kBorder, width: 0.5),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(50),
-                  borderSide: const BorderSide(color: kBlue, width: 1),
-                ),
-                contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                isDense: true,
-              ),
             ),
           ),
-          const SizedBox(width: 8),
-          GestureDetector(
-            onTap: _saveCurrentCity,
-            child: Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                color: kCard,
-                borderRadius: BorderRadius.circular(50),
-                border: Border.all(color: kBorder, width: 0.5),
-              ),
-              child: const Icon(Icons.bookmark_add_outlined,
-                  color: kBlue, size: 20),
-            ),
-          ),
-        ]),
-      );
+        ],
+      ),
+    );
+  }
 
-  Widget _buildUnitToggle() => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(_formattedDate(),
-                style: const TextStyle(fontSize: 13, color: kTextTertiary)),
-            GestureDetector(
-              onTap: () => setState(() => _isCelsius = !_isCelsius),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: kCard,
-                  borderRadius: BorderRadius.circular(50),
-                  border: Border.all(color: kBorder, width: 0.5),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _unitBtn('°C', _isCelsius),
-                    _unitBtn('°F', !_isCelsius),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
-
-  Widget _unitBtn(String label, bool active) => AnimatedContainer(
-        duration: const Duration(milliseconds: 180),
-        padding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-        decoration: BoxDecoration(
-          color: active ? kBlue : Colors.transparent,
-          borderRadius: BorderRadius.circular(50),
-        ),
-        child: Text(label,
-            style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: active ? Colors.white : kTextTertiary)),
-      );
+  Widget _unitBtn(String label, bool active) {
+    final c = context.ac;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: active ? c.blue : Colors.transparent,
+        borderRadius: BorderRadius.circular(50),
+      ),
+      child: Text(label, style: TextStyle(
+          fontSize: 13, fontWeight: FontWeight.w600,
+          color: active ? Colors.white : c.textTertiary)),
+    );
+  }
 
   Widget _buildErrorBanner() => Padding(
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
@@ -780,16 +770,13 @@ class _WeatherHomeState extends State<WeatherHome> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Padding(
-          padding: EdgeInsets.fromLTRB(20, 20, 20, 8),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
           child: Row(children: [
-            Icon(Icons.push_pin_rounded, size: 14, color: kPinned),
-            SizedBox(width: 6),
-            Text('Pinned cities',
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: kTextSecondary)),
+            const Icon(Icons.push_pin_rounded, size: 14, color: kPinned),
+            const SizedBox(width: 6),
+            Text('Pinned cities', style: TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600, color: context.ac.textSecondary)),
           ]),
         ),
         SizedBox(
@@ -802,17 +789,7 @@ class _WeatherHomeState extends State<WeatherHome> {
             itemBuilder: (_, i) {
               final c = pinned[i];
               return GestureDetector(
-                onTap: () => setState(() {
-                  _weather = WeatherData(
-                    city: c.city,
-                    condition: c.condition,
-                    temp: c.temp,
-                    feelsLike: c.feelsLike,
-                    humidity: c.humidity,
-                    windKph: c.windKph,
-                  );
-                  _selectedHour = 0;
-                }),
+                onTap: () => _fetchWeather(c.city),
                 child: Container(
                   width: 130,
                   decoration: BoxDecoration(
@@ -827,12 +804,15 @@ class _WeatherHomeState extends State<WeatherHome> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Text(c.city,
-                              style: const TextStyle(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.white),
-                              overflow: TextOverflow.ellipsis),
+                          Expanded(
+                            child: Text(c.city,
+                                style: const TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white),
+                                overflow: TextOverflow.ellipsis),
+                          ),
+                          const SizedBox(width: 8),
                           Text(_conditionIcon(c.condition),
                               style: const TextStyle(fontSize: 16)),
                         ],
@@ -859,11 +839,13 @@ class _WeatherHomeState extends State<WeatherHome> {
     );
   }
 
-  Widget _buildWeatherCard() => Padding(
+  Widget _buildWeatherCard() {
+    final w = _weather!;
+    return Padding(
         padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
         child: Container(
           decoration: BoxDecoration(
-            color: _conditionColor(_weather.condition),
+            color: _conditionColor(w.condition),
             borderRadius: BorderRadius.circular(24),
           ),
           padding: const EdgeInsets.all(24),
@@ -877,7 +859,7 @@ class _WeatherHomeState extends State<WeatherHome> {
                     child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(_weather.city,
+                          Text(w.city,
                               style: const TextStyle(
                                   fontSize: 24,
                                   fontWeight: FontWeight.w600,
@@ -898,17 +880,17 @@ class _WeatherHomeState extends State<WeatherHome> {
                   Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('${_toDisplay(_weather.temp)}$_unit',
+                        Text('${_toDisplay(w.temp)}$_unit',
                             style: const TextStyle(
                                 fontSize: 72,
                                 fontWeight: FontWeight.w300,
                                 color: Colors.white,
                                 height: 1.0)),
-                        Text(_weather.condition,
+                        Text(w.condition,
                             style: const TextStyle(
                                 fontSize: 16, color: Colors.white70)),
                       ]),
-                  Text(_conditionIcon(_weather.condition),
+                  Text(_conditionIcon(w.condition),
                       style: const TextStyle(fontSize: 80)),
                 ],
               ),
@@ -919,17 +901,18 @@ class _WeatherHomeState extends State<WeatherHome> {
                 mainAxisAlignment: MainAxisAlignment.spaceAround,
                 children: [
                   _weatherStat(Icons.thermostat_outlined, 'Feels like',
-                      '${_toDisplay(_weather.feelsLike)}$_unit'),
+                      '${_toDisplay(w.feelsLike)}$_unit'),
                   _weatherStat(Icons.water_drop_outlined, 'Humidity',
-                      '${_weather.humidity}%'),
+                      '${w.humidity}%'),
                   _weatherStat(
-                      Icons.air, 'Wind', '${_weather.windKph} km/h'),
+                      Icons.air, 'Wind', '${w.windKph} km/h'),
                 ],
               ),
             ],
           ),
         ),
       );
+  }
 
   Widget _weatherStat(IconData icon, String label, String value) => Column(
         children: [
@@ -947,111 +930,83 @@ class _WeatherHomeState extends State<WeatherHome> {
         ],
       );
 
-  Widget _buildSectionTitle(String title) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
-        child: Text(title,
-            style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: kTextSecondary)),
-      );
+  Widget _buildSectionTitle(String title) {
+    final c = context.ac;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+      child: Text(title, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: c.textSecondary)),
+    );
+  }
 
-  Widget _buildHourlyRow() => SizedBox(
-        height: 96,
-        child: ListView.separated(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          itemCount: _hourly.length,
-          separatorBuilder: (_, __) => const SizedBox(width: 8),
-          itemBuilder: (_, i) {
-            final isActive = _selectedHour == i;
-            return GestureDetector(
-              onTap: () => setState(() => _selectedHour = i),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                width: 68,
-                decoration: BoxDecoration(
-                  color: isActive ? kBlueLight : kCard,
-                  border: Border.all(
-                    color: isActive ? kBlue : kBorder,
-                    width: isActive ? 1.5 : 0.5,
-                  ),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(_hourly[i].time,
-                        style: TextStyle(
-                            fontSize: 11,
-                            color:
-                                isActive ? kBlue : kTextTertiary)),
-                    const SizedBox(height: 4),
-                    Text(_hourly[i].icon,
-                        style: const TextStyle(fontSize: 22)),
-                    const SizedBox(height: 4),
-                    Text('${_toDisplay(_hourly[i].temp)}$_unit',
-                        style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: isActive ? kBlue : kTextPrimary)),
-                  ],
-                ),
-              ),
-            );
-          },
-        ),
-      );
-
-  Widget _buildDailyList() => Padding(
+  Widget _buildHourlyRow() {
+    final c = context.ac;
+    return SizedBox(
+      height: 96,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 20),
-        child: Container(
-          decoration: BoxDecoration(
-            color: kCard,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Column(
-            children: _daily.asMap().entries.map((e) {
-              final i = e.key;
-              final d = e.value;
-              return Column(children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 16, vertical: 12),
-                  child: Row(children: [
-                    SizedBox(
-                      width: 40,
-                      child: Text(d.day,
-                          style: const TextStyle(
-                              fontSize: 14, color: kTextSecondary)),
-                    ),
-                    Text(d.icon,
-                        style: const TextStyle(fontSize: 20)),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(d.condition,
-                          style: const TextStyle(
-                              fontSize: 13, color: kTextTertiary)),
-                    ),
-                    Text(
-                        '${_toDisplay(d.low)}° / ${_toDisplay(d.high)}°$_unit',
-                        style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: kTextPrimary)),
-                  ]),
-                ),
-                if (i < _daily.length - 1)
-                  const Divider(
-                      height: 1,
-                      indent: 16,
-                      endIndent: 16,
-                      color: Color(0xFFF3F4F6)),
-              ]);
-            }).toList(),
-          ),
+        itemCount: _hourly.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (_, i) {
+          final isActive = _selectedHour == i;
+          return GestureDetector(
+            onTap: () => setState(() => _selectedHour = i),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              width: 68,
+              decoration: BoxDecoration(
+                color: isActive ? c.blueLight : c.card,
+                border: Border.all(color: isActive ? c.blue : c.border, width: isActive ? 1.5 : 0.5),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text(_hourly[i].time, style: TextStyle(fontSize: 11, color: isActive ? c.blue : c.textTertiary)),
+                  const SizedBox(height: 4),
+                  Text(_hourly[i].icon, style: const TextStyle(fontSize: 22)),
+                  const SizedBox(height: 4),
+                  Text('${_toDisplay(_hourly[i].temp)}$_unit',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: isActive ? c.blue : c.textPrimary)),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildDailyList() {
+    final c = context.ac;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Container(
+        decoration: BoxDecoration(color: c.card, borderRadius: BorderRadius.circular(20)),
+        child: Column(
+          children: _daily.asMap().entries.map((e) {
+            final i = e.key;
+            final d = e.value;
+            return Column(children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(children: [
+                  SizedBox(width: 40, child: Text(d.day, style: TextStyle(fontSize: 14, color: c.textSecondary))),
+                  Text(d.icon, style: const TextStyle(fontSize: 20)),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(d.condition, style: TextStyle(fontSize: 13, color: c.textTertiary))),
+                  Text('${_toDisplay(d.low)}° / ${_toDisplay(d.high)}°$_unit',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: c.textPrimary)),
+                ]),
+              ),
+              if (i < _daily.length - 1)
+                Divider(height: 1, indent: 16, endIndent: 16, color: c.border),
+            ]);
+          }).toList(),
         ),
-      );
+      ),
+    );
+  }
 
   String _formattedDate() {
     final now = DateTime.now();
