@@ -29,10 +29,6 @@ class _LoginScreenState extends State<LoginScreen>
   late Animation<double> _fadeAnim;
   late Animation<Offset> _slideAnim;
 
-  // Demo credentials — replace with real auth
-  static const _demoEmail = 'admin@skytrack.app';
-  static const _demoPass = 'SkyTrack@2025';
-
   @override
   void initState() {
     super.initState();
@@ -54,6 +50,87 @@ class _LoginScreenState extends State<LoginScreen>
     super.dispose();
   }
 
+  // ── POST /forgot-password ─────────────────────────────────────────────────
+
+  Future<void> _showForgotPasswordDialog() async {
+    final emailCtrl = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Forgot Password'),
+        content: Form(
+          key: formKey,
+          child: TextFormField(
+            controller: emailCtrl,
+            keyboardType: TextInputType.emailAddress,
+            style: const TextStyle(fontSize: 14),
+            decoration: const InputDecoration(
+              labelText: 'Email address',
+              prefixIcon: Icon(Icons.email_outlined, size: 18),
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            validator: (v) {
+              if (v == null || v.isEmpty) return 'Email is required';
+              if (!v.contains('@')) return 'Enter a valid email';
+              return null;
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              if (!formKey.currentState!.validate()) return;
+              Navigator.pop(ctx);
+              await _sendForgotPassword(emailCtrl.text.trim());
+            },
+            child: const Text('Send Reset Link'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _sendForgotPassword(String email) async {
+    setState(() { _loading = true; _error = null; });
+    try {
+      final res = await http.post(
+        Uri.parse('http://127.0.0.1:8000/api/forgot-password'),
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: jsonEncode({'email': email}),
+      ).timeout(const Duration(seconds: 5));
+
+      final body = jsonDecode(res.body);
+      if (!mounted) return;
+      if (res.statusCode == 200) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(body['message'] ?? 'Reset link sent!'),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: Colors.green.shade600,
+          ),
+        );
+      } else {
+        setState(() { _error = body['message'] ?? 'Email not found.'; });
+      }
+    } catch (_) {
+      setState(() { _error = 'Could not connect to server.'; });
+    } finally {
+      if (mounted) setState(() { _loading = false; });
+    }
+  }
+
+  // ── POST /login & POST /register ──────────────────────────────────────────
+
   Future<void> _login() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() { _loading = true; _error = null; });
@@ -71,17 +148,33 @@ class _LoginScreenState extends State<LoginScreen>
           'Content-Type': 'application/json',
           'Accept': 'application/json',
         },
-        body: jsonEncode({
-          'name': name,
-          'email': email,
-          'password': pass,
-        }),
+        body: jsonEncode(_isSignup
+            ? {
+                'name': name,
+                'email': email,
+                'password': pass,
+                'password_confirmation': pass,
+              }
+            : {
+                'email': email,
+                'password': pass,
+              }),
       ).timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200 || response.statusCode == 201) {
+        final resBody = jsonDecode(response.body);
         final prefs = await SharedPreferences.getInstance();
+        
         await prefs.setBool('is_logged_in', true);
         await prefs.setString('user_email', email);
+        
+        // Save name if provided by the backend (crucial for persistence)
+        if (resBody['user'] != null && resBody['user']['name'] != null) {
+          await prefs.setString('user_name', resBody['user']['name']);
+        } else if (_isSignup && name.isNotEmpty) {
+          await prefs.setString('user_name', name);
+        }
+
         if (!mounted) return;
         Navigator.of(context).pushReplacementNamed('/home');
       } else {
@@ -93,7 +186,7 @@ class _LoginScreenState extends State<LoginScreen>
       }
     } catch (e) {
       setState(() { 
-        _error = 'Could not connect to server. Ensure Laravel is running on 192.168.1.60'; 
+        _error = 'Could not connect to server.'; 
         _loading = false; 
       });
     }
@@ -232,7 +325,7 @@ class _LoginScreenState extends State<LoginScreen>
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton(
-                    onPressed: () {},
+                    onPressed: _showForgotPasswordDialog,
                     child: Text('Forgot password?',
                         style: TextStyle(
                             fontSize: 12, color: _kAccent.withOpacity(0.8))),

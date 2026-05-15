@@ -5,6 +5,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'login_screen.dart';
 import 'search_autocomplete.dart';
 import 'app_theme.dart';
+import 'profile_screen.dart';
+import 'weather_logs_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,6 +33,8 @@ class SkyTrackApp extends StatelessWidget {
         routes: {
           '/home': (_) => const WeatherHome(),
           '/login': (_) => const LoginScreen(),
+          '/profile': (_) => const ProfileScreen(),
+          '/logs': (_) => const WeatherLogsScreen(),
         },
       ),
     );
@@ -285,6 +289,20 @@ class _WeatherHomeState extends State<WeatherHome> {
   }
 
   Future<void> _logout() async {
+    // Show a friendly reminder before signing out
+    await showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Goodbye!'),
+        content: const Text("Whenever you want to know the sky's mood just log in again!"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool('is_logged_in', false);
     if (!mounted) return;
@@ -328,7 +346,7 @@ class _WeatherHomeState extends State<WeatherHome> {
     setState(() { _loading = true; _error = null; });
     try {
       final url =
-          Uri.parse('http://localhost:8000/api/weather/${city.trim()}');
+          Uri.parse('http://127.0.0.1:8000/api/weather/${city.trim()}');
       final res = await http.get(url).timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         final d = jsonDecode(res.body);
@@ -670,6 +688,12 @@ Widget _buildEmptyState() {
                     ),
                   ),
               ],
+            ),
+            IconButton(
+              icon: const Icon(Icons.list_alt_outlined),
+              color: c.textSecondary,
+              tooltip: 'Weather Logs',
+              onPressed: () => Navigator.of(context).pushNamed('/logs'),
             ),
             IconButton(
               icon: Icon(context.isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined),

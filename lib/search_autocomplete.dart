@@ -1,16 +1,27 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'app_theme.dart';
 
 // Fallback popular cities shown before any query
 const _popularCities = [
-  'Manila', 'Cebu City', 'Davao', 'Quezon City', 'Makati',
+  // --- Original List ---
+  'Manila', 'Cebu City', 'Davao', 'Quezon City', 'Makati', 
   'Iloilo', 'Bacolod', 'Cagayan de Oro', 'Zamboanga', 'Baguio',
-  'Tokyo', 'Singapore', 'Bangkok', 'London', 'New York',
+  'Tokyo', 'Singapore', 'Bangkok', 'London', 'New York', 
   'Sydney', 'Dubai', 'Paris', 'Jakarta', 'Seoul',
+
+  // --- Added Philippine Majority Hubs ---
+  // High-Population Metro Manila Cities
+  'Caloocan', 'Taguig', 'Pasig', 'Parañaque', 'Valenzuela', 
+  'Las Piñas', 'Muntinlupa', 'Marikina', 'Pasay', 'Mandaluyong',
+
+  // Major Provincial & Regional Hubs
+  'Antipolo', 'Dasmariñas', 'Bacoor', 'San Jose del Monte', 
+  'General Santos', 'Lapu-Lapu City', 'Calamba', 'Imus', 
+  'Angeles City', 'Batangas City', 'Tarlac City', 'Butuan', 
+  'Biñan', 'Santa Rosa', 'Lucena', 'Puerto Princesa'
 ];
+
 
 class CitySearchBar extends StatefulWidget {
   final void Function(String city) onSearch;
@@ -61,30 +72,14 @@ class _CitySearchBarState extends State<CitySearchBar> {
   // ── Suggestion fetch ────────────────────────────────────────────────────────
 
   Future<List<String>> _fetchSuggestions(String query) async {
-    try {
-      // Try backend autocomplete endpoint first
-      final uri =
-          Uri.parse('http://localhost:8000/api/cities/search?q=${Uri.encodeComponent(query)}');
-      final res = await http.get(uri).timeout(const Duration(seconds: 2));
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        if (data is List) {
-          return data.map((e) => e.toString()).take(8).toList();
-        }
-        if (data is Map && data['cities'] is List) {
-          return (data['cities'] as List).map((e) => e.toString()).take(8).toList();
-        }
-      }
-    } catch (_) {
-      // Fall through to local filter
-    }
-    // Local fallback
+    // Local filter only — backend has no /cities/search endpoint
     final q = query.toLowerCase();
     return _popularCities
         .where((c) => c.toLowerCase().contains(q))
-        .take(6)
+        .take(8)
         .toList();
   }
+
 
   void _onChanged(String value) {
     _debounce?.cancel();
